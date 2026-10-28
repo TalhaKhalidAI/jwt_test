@@ -10,6 +10,7 @@ from App.services.base import BaseService
 from App.repository.ShiftRepository import ShiftRepository
 from App.repository.CryptoKeyRepository import CryptoKeyRepository
 from App.repository.UserRepository import UserRepository
+from App.repository.InventoryRuleRepository import InventoryRuleRepository
 from App.core.settings import settings
 from App.core.aes_crypto import decrypt_data
 from App.core.RedisConnector import redis_client
@@ -51,6 +52,7 @@ class ShiftService(BaseService):
         self.repo = ShiftRepository(db)
         self.key_repo = CryptoKeyRepository(db)
         self.user_repo = UserRepository(db)
+        self.rule_repo = InventoryRuleRepository(db)
 
     # ================================================================
     # INTERNAL HELPERS
@@ -84,14 +86,20 @@ class ShiftService(BaseService):
             "revoked_reason": shift.revoked_reason,
         }
 
-    def _generate_shift_token(self, shift, user, crypto_key) -> str:
+    def _generate_shift_token(
+        self, shift, user, crypto_key, rules: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
         Mint a scoped asymmetric (RS256) shift_token JWT for mobile scanner authorization.
         Decrypts the private key of the assigned CryptoKey in RAM to sign the token,
-        and embeds user permissions, shift metadata, and key identifier (kid).
+        and embeds user permissions, active inventory rules, shift metadata, and key identifier (kid).
         """
         private_pem = decrypt_data(crypto_key.private_key_encrypted)
-        user_perms = user.permissions or {}
+        user_perms = dict(user.permissions or {})
+        # Mobile app shift operator defaults
+        user_perms.setdefault(Permission.SCANS_VIEW_OWN.value, True)
+        user_perms.setdefault(Permission.SCANS_CREATE.value, True)
+        user_perms.setdefault(Permission.INVENTORY_RULES_VIEW.value, True)
 
         to_encode = {
             "sub": user.email,
@@ -101,6 +109,7 @@ class ShiftService(BaseService):
             "kid": crypto_key.kid,
             "role": user.user_role,
             "permissions": user_perms,
+            "rules": rules or {},
             "type": "shift_token",
             "exp": shift.expires_at,
             "iat": datetime.now(timezone.utc),
@@ -131,6 +140,7 @@ class ShiftService(BaseService):
         - Automatically resolves active signing key if key_id is omitted.
         - Signs scoped RS256 shift_token JWT using the decrypted private key.
         - Embeds target user's active permissions into the token claims.
+        - Embeds applicable inventory rules (matching_claim_key: expected_value) into the token claims.
         - Returns shift details + scoped shift_token JWT for scanner verification.
         """
         auth_user_id = self._get_user_id(current_user)
@@ -166,6 +176,10 @@ class ShiftService(BaseService):
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(hours=duration_hours)
 
+        # Fetch applicable inventory rules for this key
+        applicable_rules = await self.rule_repo.get_applicable_rules(key_id=assigned_key_id)
+        rules_dict = {r.matching_claim_key: r.expected_value for r in applicable_rules}
+
         shift = await self.repo.create_shift(
             user_id=assigned_user_id,
             key_id=assigned_key_id,
@@ -173,9 +187,11 @@ class ShiftService(BaseService):
             device_id=device_id,
         )
 
-        shift_token = self._generate_shift_token(shift, user, crypto_key)
+        shift_token = self._generate_shift_token(shift, user, crypto_key, rules=rules_dict)
 
-        logger.info(f"Started shift {shift.id} for user {assigned_user_id} on device {device_id}")
+        logger.info(
+            f"Started shift {shift.id} for user {assigned_user_id} with {len(rules_dict)} rules on device {device_id}"
+        )
         return {
             "shift": self._to_dict(shift),
             "shift_token": shift_token,

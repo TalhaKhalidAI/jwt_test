@@ -1,7 +1,9 @@
 # App/schemas/CryptoKeySchema.py
 
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, List,Dict,Any
+from typing import Optional, List, Dict, Any
+from enum import Enum
+from datetime import datetime
 
 
 class CreateKeyRequest(BaseModel):
@@ -116,4 +118,68 @@ class VerifyTokenResponse(BaseModel):
     kid: str
     key_name: str
     payload: Dict[str, Any]
+
+
+class ExpirationUnit(str, Enum):
+    """Supported time units for flexible product tag token expiration."""
+    MINUTES = "minutes"
+    HOURS = "hours"
+    DAYS = "days"
+    WEEKS = "weeks"
+    MONTHS = "months"
+    YEARS = "years"
+
+
+class GenerateProductTagQRRequest(BaseModel):
+    """Request payload to generate a signed RS256 product tag QR code."""
+    key_id: Optional[str] = Field(
+        None,
+        description="Optional CryptoKey UUID from database to sign with. If omitted, signs with latest active key."
+    )
+    payload: Dict[str, Any] = Field(
+        ...,
+        description="Arbitrary product attributes (e.g. {'product_id': 'P-101', 'sku': 'SKU-88', 'batch_no': 'B-2026', 'warehouse': 'WH-A'})"
+    )
+    expires_in_value: int = Field(
+        30,
+        ge=1,
+        description="Numerical duration value before expiration"
+    )
+    expires_in_unit: ExpirationUnit = Field(
+        ExpirationUnit.DAYS,
+        description="Unit for expiration duration: minutes, hours, days, weeks, months, years"
+    )
+    box_size: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="Size of each QR code box/pixel in pixels"
+    )
+    border: int = Field(
+        4,
+        ge=1,
+        le=20,
+        description="Thickness of white border in boxes"
+    )
+    format: str = Field(
+        "json",
+        description="'json' for JSON with base64 Data URL, or 'png' for direct image/png download"
+    )
+
+
+class ProductTagQRResponse(BaseModel):
+    """Response returned upon generating a signed product QR tag."""
+    status: str = "success"
+    key_id: str
+    kid: str
+    token: str
+    qr_code_base64: str
+    created_by: int
+    created_by_email: str
+    expires_at: datetime
+    expires_in_seconds: int
+    qr_version: int
+    payload: Dict[str, Any]
+
+
 

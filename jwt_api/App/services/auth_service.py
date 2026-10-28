@@ -204,6 +204,13 @@ class AuthService:
             "user.history.delete": True,
             "user.self.enable": True,
             "user.disable.self": True,
+            "shifts.view": True,
+            "inventory_rules.view": True,
+            "scans.view.own": True,
+            "scans.create": True,
+            "keys.view": True,
+            
+
         }
 
         return await repo.create(user_dict)

@@ -293,13 +293,33 @@ async def _validate_token_payload(payload: Dict[str, Any]) -> None:
         )
 
     token_type = payload.get("type")
-    if token_type != "access":
-        logger.warning(f"Non-access token used for authentication: type={token_type!r}")
+    if token_type not in ("access", "shift_token"):
+        logger.warning(f"Non-access/non-shift token used for authentication: type={token_type!r}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type. An access token is required.",
+            detail="Invalid token type. An access or shift token is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    if token_type == "shift_token":
+        shift_id = payload.get("shift_id")
+        if shift_id:
+            try:
+                from App.core.redis_keys import revoked_shift_key
+                from App.core.RedisConnector import redis_client
+                c = await redis_client.ensure_connected()
+                if await c.exists(revoked_shift_key(shift_id)):
+                    logger.warning(f"Revoked shift token used: shift_id={shift_id}")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="This shift has been revoked by admin",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"Could not verify shift revocation in Redis: {e}")
+
 
     exp = payload.get("exp")
     if exp is None:
@@ -340,9 +360,14 @@ async def _validate_token_payload(payload: Dict[str, Any]) -> None:
 
 def _user_dict(user, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Build the auth context dictionary returned to route handlers."""
+    db_perms = user.permissions if isinstance(user.permissions, dict) else {}
+    token_perms = payload.get("permissions") if isinstance(payload.get("permissions"), dict) else {}
+    merged_perms = {**db_perms, **token_perms}
+
     return {
-        "permissions": user.permissions,
+        "permissions": merged_perms,
         "id": user.id,
+
         "user_id": user.id,
         "email": user.email,
         "name": user.name,
@@ -444,6 +469,25 @@ async def get_current_user(
         crypto_key = None
         if kid:
             crypto_key = await key_repo.get_by_kid(kid)
+            if not crypto_key:
+                try:
+                    crypto_key = await key_repo.get_by_id(kid)
+                except Exception:
+                    pass
+        if not crypto_key:
+            try:
+                unverified_claims = jwt.decode(token, options={"verify_signature": False})
+                claim_kid = unverified_claims.get("kid")
+                claim_key_id = unverified_claims.get("key_id")
+                if claim_kid:
+                    crypto_key = await key_repo.get_by_kid(str(claim_kid))
+                if not crypto_key and claim_key_id:
+                    try:
+                        crypto_key = await key_repo.get_by_id(str(claim_key_id))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         if not crypto_key:
             crypto_key = await key_repo.get_latest_active_key()
         

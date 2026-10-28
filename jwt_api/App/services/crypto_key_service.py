@@ -2,6 +2,10 @@
 
 from typing import Optional, List, Dict, Any
 import uuid
+import io
+import base64
+import qrcode
+from qrcode.constants import ERROR_CORRECT_M
 from datetime import datetime, timedelta, timezone
 import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from App.services.base import BaseService
 from App.repository.CryptoKeyRepository import CryptoKeyRepository
 from App.repository.UserRepository import UserRepository
+from App.repository.InventoryRuleRepository import InventoryRuleRepository
 from App.core.rsa_crypto import RSAKeyGenerator
 from App.core.aes_crypto import encrypt_data, decrypt_data
 from App.core.settings import settings
@@ -45,6 +50,7 @@ class CryptoKeyService(BaseService):
         self.db = db
         self.repo = CryptoKeyRepository(db)
         self.user_repo = UserRepository(db)
+        self.rule_repo = InventoryRuleRepository(db)
 
     # ================================================================
     # SERIALIZATION HELPERS
@@ -348,10 +354,17 @@ class CryptoKeyService(BaseService):
         # 4. Decrypt Private Key in RAM
         private_pem = decrypt_data(key.private_key_encrypted)
 
-        # 5. Construct Payload & Sign
+        # 5. Resolve applicable inventory rules for this key
+        applicable_rules = await self.rule_repo.get_applicable_rules(key_id=key.id)
+        rules_dict = {r.matching_claim_key: r.expected_value for r in applicable_rules}
+
+        # 6. Construct Payload & Sign
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(minutes=expires_in_minutes)
-        user_perms = user.permissions or {}
+        user_perms = dict(user.permissions or {})
+        user_perms.setdefault("scans.view.own", True)
+        user_perms.setdefault("scans.create", True)
+        user_perms.setdefault("inventory_rules.view", True)
 
         payload = {
             "sub": user.email,
@@ -359,6 +372,7 @@ class CryptoKeyService(BaseService):
             "name": user.name,
             "role": user.user_role,
             "permissions": user_perms,
+            "rules": rules_dict,
             "type": "access",
             "kid": key.kid,
             "iat": now,
@@ -368,7 +382,7 @@ class CryptoKeyService(BaseService):
 
         if extra_claims:
             for k, v in extra_claims.items():
-                if k not in ("sub", "user_id", "name", "role", "permissions", "type", "iat", "exp", "kid"):
+                if k not in ("sub", "user_id", "name", "role", "permissions", "rules", "type", "iat", "exp", "kid"):
                     payload[k] = v
 
         encoded_jwt = jwt.encode(
@@ -379,7 +393,7 @@ class CryptoKeyService(BaseService):
         )
 
         logger.info(
-            f"Issued RS256 token for user {user.id} ({user.email}) with {len(user_perms)} permissions using key {key.id} (kid={key.kid})"
+            f"Issued RS256 token for user {user.id} ({user.email}) with {len(user_perms)} permissions and {len(rules_dict)} rules using key {key.id} (kid={key.kid})"
         )
 
         return {
@@ -475,4 +489,160 @@ class CryptoKeyService(BaseService):
             "key_name": key.name,
             "payload": decoded_payload,
         }
+
+    async def generate_product_tag_qr(
+        self,
+        current_user: Dict[str, Any],
+        payload_data: Dict[str, Any],
+        expires_in_value: int = 30,
+        expires_in_unit: str = "days",
+        key_id: Optional[str | uuid.UUID] = None,
+        box_size: int = 10,
+        border: int = 4,
+    ) -> Dict[str, Any]:
+        """
+        Generate an RS256-signed Product Tag JWT and render it into a dynamically fitted QR code.
+
+        Creator Attribution:
+            - The tag is ALWAYS stamped with the authenticated user who created it (user_id, created_by, created_by_email, creator_name).
+
+        Permissions:
+            - Admins (role == "admin"): Can generate product tags with any key.
+            - Normal users: Must have 'tags.create' (or 'keys.create' / 'inventory_rules.create') permission.
+
+        Features:
+            - Flexible expiration units: minutes, hours, days, weeks, months, years.
+            - Embeds custom user-provided attributes (SKU, product_id, batch_no, warehouse, etc.).
+            - QR code dimension dynamically adapts to fit the complete JWT data size.
+        """
+        auth_user_id = current_user.get("user_id") or current_user.get("id")
+        is_admin = current_user.get("role") == "admin"
+        if not auth_user_id:
+            raise PermissionDeniedError("Could not determine authenticated user ID from token")
+
+        user = await self.user_repo.get_by_id(auth_user_id)
+        if not user or user.is_deleted:
+            raise UserNotFoundError(f"User {auth_user_id} not found or inactive")
+
+        user_perms = current_user.get("permissions") or {}
+        if isinstance(user.permissions, dict):
+            user_perms = {**user.permissions, **user_perms}
+
+        # 1. Permission Gate
+        has_permission = (
+            is_admin
+            or user_perms.get(Permission.TAGS_CREATE.value) is True
+            or user_perms.get(Permission.KEYS_CREATE.value) is True
+            or user_perms.get(Permission.INVENTORY_RULES_CREATE.value) is True
+            or user_perms.get("*") is True
+        )
+        if not has_permission:
+            raise PermissionDeniedError(
+                "You are not authorized to generate product tag QR codes (requires 'tags.create' permission or Admin role)"
+            )
+
+
+        # 3. Cryptographic Key Resolution
+        if key_id:
+            key = await self.repo.get_by_id(key_id)
+            if not key:
+                raise CryptoKeyNotFoundError(f"Cryptographic key {key_id} not found")
+            if key.status != "active":
+                raise InvalidCryptoKeyStateError(f"Key {key_id} status is '{key.status}', cannot sign tokens")
+        else:
+            key = await self.repo.get_latest_active_key()
+            if not key:
+                raise CryptoKeyNotFoundError("No active cryptographic key found to sign product tag tokens")
+
+        # 4. Decrypt Private RSA Key in RAM
+        private_pem = decrypt_data(key.private_key_encrypted)
+
+        # 5. Calculate Flexible Expiration
+        unit_clean = str(expires_in_unit).lower().strip()
+        if unit_clean in ("min", "minute", "minutes"):
+            exp_seconds = expires_in_value * 60
+        elif unit_clean in ("hour", "hours", "hr", "hrs"):
+            exp_seconds = expires_in_value * 3600
+        elif unit_clean in ("day", "days", "d"):
+            exp_seconds = expires_in_value * 86400
+        elif unit_clean in ("week", "weeks", "w"):
+            exp_seconds = expires_in_value * 7 * 86400
+        elif unit_clean in ("month", "months", "mo"):
+            exp_seconds = expires_in_value * 30 * 86400
+        elif unit_clean in ("year", "years", "yr", "yrs"):
+            exp_seconds = expires_in_value * 365 * 86400
+        else:
+            raise ValidationError(
+                f"Invalid expiration unit '{expires_in_unit}'. Supported: minutes, hours, days, weeks, months, years"
+            )
+
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(seconds=exp_seconds)
+
+        # 6. Build JWT Claims with Creator Attribution
+        jwt_claims = {
+            "iss": "veriflow-api",
+            "sub": user.email,
+            "user_id": user.id,
+            "created_by": user.id,
+            "created_by_email": user.email,
+            "creator_name": user.name,
+            "type": "product_tag",
+            "kid": key.kid,
+            "key_id": str(key.id),
+            "iat": int(now.timestamp()),
+            "exp": int(expires_at.timestamp()),
+            "jti": str(uuid.uuid4()),
+        }
+
+        # Embed custom user payload
+        for k, v in payload_data.items():
+            if k not in ("iss", "sub", "iat", "exp", "jti", "kid", "key_id"):
+                jwt_claims[k] = v
+
+        # 7. Sign RS256 JWT
+        encoded_jwt = jwt.encode(
+            jwt_claims,
+            private_pem,
+            algorithm="RS256",
+            headers={"kid": key.kid, "alg": "RS256", "typ": "JWT"},
+        )
+
+        # 8. Render Dynamic QR Code (Auto-sized according to JWT length)
+        qr = qrcode.QRCode(
+            version=None,  # Automatically chooses smallest suitable QR version (1 to 40)
+            error_correction=ERROR_CORRECT_M,
+            box_size=box_size,
+            border=border,
+        )
+        qr.add_data(encoded_jwt)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        png_bytes = buffer.getvalue()
+        qr_b64 = base64.b64encode(png_bytes).decode("utf-8")
+        qr_data_url = f"data:image/png;base64,{qr_b64}"
+
+        logger.info(
+            f"Generated product tag QR created by user {user.id} ({user.email}) using key {key.id} (kid={key.kid}). "
+            f"QR version={qr.version}, token length={len(encoded_jwt)} bytes"
+        )
+
+        return {
+            "key_id": str(key.id),
+            "kid": key.kid,
+            "token": encoded_jwt,
+            "png_bytes": png_bytes,
+            "qr_code_base64": qr_data_url,
+            "created_by": user.id,
+            "created_by_email": user.email,
+            "expires_at": expires_at,
+            "expires_in_seconds": exp_seconds,
+            "qr_version": qr.version,
+            "payload": jwt_claims,
+        }
+
+
 

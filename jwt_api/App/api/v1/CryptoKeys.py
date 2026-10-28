@@ -12,7 +12,7 @@ Permissions & Authorization Rules:
     - Public (Unauthenticated): Can access GET /keys/jwks to verify token signatures offline.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional
 
@@ -41,7 +41,10 @@ from App.schemas.CryptoKeySchema import (
     IssueTokenResponse,
     VerifyTokenRequest,
     VerifyTokenResponse,
+    GenerateProductTagQRRequest,
+    ProductTagQRResponse,
 )
+
 
 logger = get_core_logger(__name__)
 crypto_keys_router = APIRouter(prefix="/keys", tags=["Cryptographic Keys"])
@@ -343,4 +346,69 @@ async def verify_token(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@crypto_keys_router.post(
+    "/tags/qr",
+    summary="Generate RS256-signed product QR code tag",
+    description=(
+        "Signs arbitrary product claims with the selected CryptoKey's private key and "
+        "dynamically generates a fitted QR code image. "
+        "Rule 1: Admins can generate product tags for anyone and with any key. "
+        "Rule 2: Normal users require 'tags.create' permission (and cannot set target_user_id for others). "
+        "Rule 3: Expiration can be specified in minutes, hours, days, weeks, months, or years. "
+        "Rule 4: Returns JSON with base64 Data URL or direct image/png download when format='png'."
+    ),
+)
+async def generate_product_tag_qr(
+    payload: GenerateProductTagQRRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = CryptoKeyService(db)
+    try:
+        result = await service.generate_product_tag_qr(
+            current_user=current_user,
+            payload_data=payload.payload,
+            expires_in_value=payload.expires_in_value,
+            expires_in_unit=payload.expires_in_unit.value,
+            key_id=payload.key_id,
+            box_size=payload.box_size,
+            border=payload.border,
+        )
+
+        if payload.format.lower() == "png":
+            return Response(
+                content=result["png_bytes"],
+                media_type="image/png",
+                headers={
+                    "Content-Disposition": f'inline; filename="product_qr_tag_{result["kid"]}.png"'
+                },
+            )
+
+        return ProductTagQRResponse(
+            status="success",
+            key_id=result["key_id"],
+            kid=result["kid"],
+            token=result["token"],
+            qr_code_base64=result["qr_code_base64"],
+            created_by=result["created_by"],
+            created_by_email=result["created_by_email"],
+            expires_at=result["expires_at"],
+            expires_in_seconds=result["expires_in_seconds"],
+            qr_version=result["qr_version"],
+            payload=result["payload"],
+        )
+
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CryptoKeyNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except InvalidCryptoKeyStateError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 

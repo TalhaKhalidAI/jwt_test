@@ -67,3 +67,6 @@ class Permission(str, Enum):
     SCANS_CREATE = "scans.create"
     SCANS_UPDATE = "scans.update"
     SCANS_DELETE = "scans.delete"
+
+    # ===== VERIFLOW: PRODUCT QR TAGS =====
+    TAGS_CREATE = "tags.create"
