@@ -80,6 +80,9 @@ class ScanHistory(Base):
     scanned_at = Column(DateTime(timezone=True), nullable=False) 
     synced_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    shift = relationship("Shift")
+
+
 
 class InventoryRule(Base):
     __tablename__ = "inventory_rules"
@@ -93,3 +96,5 @@ class InventoryRule(Base):
     
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    crypto_key = relationship("CryptoKey")

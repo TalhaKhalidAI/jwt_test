@@ -64,4 +64,6 @@ class Permission(str, Enum):
     # ===== VERIFLOW: SCAN LOGS =====
     SCANS_VIEW_ANY = "scans.view.any"
     SCANS_VIEW_OWN = "scans.view.own"
+    SCANS_CREATE = "scans.create"
+    SCANS_UPDATE = "scans.update"
     SCANS_DELETE = "scans.delete"

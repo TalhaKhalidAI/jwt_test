@@ -9,7 +9,10 @@ from sqlalchemy import select, or_, and_, desc, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from App.api.databases.MigrateTable import InventoryRule as InventoryRuleModel
+from App.api.databases.MigrateTable import (
+    InventoryRule as InventoryRuleModel,
+    CryptoKey as CryptoKeyModel,
+)
 from App.core.exceptions import (
     InventoryRuleNotFoundError,
     DuplicateInventoryRuleError,
@@ -125,6 +128,28 @@ class InventoryRuleRepository:
         stmt = stmt.limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_rules_by_user(
+        self,
+        user_id: int,
+        is_active: Optional[bool] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[InventoryRuleModel]:
+        """Fetch rules associated with keys owned by a specific user."""
+        stmt = (
+            select(InventoryRuleModel)
+            .join(CryptoKeyModel, InventoryRuleModel.key_id == CryptoKeyModel.id)
+            .where(CryptoKeyModel.created_by == user_id)
+            .order_by(desc(InventoryRuleModel.created_at))
+        )
+        if is_active is not None:
+            stmt = stmt.where(InventoryRuleModel.is_active == is_active)
+
+        stmt = stmt.limit(limit).offset(offset)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
     # ================================================================
     # WRITE OPERATIONS

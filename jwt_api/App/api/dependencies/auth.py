@@ -430,7 +430,27 @@ async def get_current_user(
     """
     token = _extract_token(credentials, cookie_auth)
 
-    payload = decode_jwt(token)
+    try:
+        header = jwt.get_unverified_header(token)
+        alg = header.get("alg", settings.ALGORITHM)
+        kid = header.get("kid")
+    except jwt.InvalidTokenError:
+        alg = settings.ALGORITHM
+        kid = None
+
+    if alg.startswith("RS") or alg.startswith("PS"):
+        from App.repository.CryptoKeyRepository import CryptoKeyRepository
+        key_repo = CryptoKeyRepository(db)
+        crypto_key = None
+        if kid:
+            crypto_key = await key_repo.get_by_kid(kid)
+        if not crypto_key:
+            crypto_key = await key_repo.get_latest_active_key()
+        
+        public_pem = crypto_key.public_key if crypto_key else None
+        payload = decode_jwt(token, public_key=public_pem)
+    else:
+        payload = decode_jwt(token)
 
     await _validate_token_payload(payload)
 
@@ -746,7 +766,8 @@ async def create_short_live_token(user_id: int, db: AsyncSession, purpose: str =
 
 
 async def get_current_shift_user(
-    credentials: HTTPAuthorizationCredentials = Depends(shift_bearer_scheme)
+    credentials: HTTPAuthorizationCredentials = Depends(shift_bearer_scheme),
+    db: AsyncSession = Depends(get_db),
 ):
     if not credentials:
         raise HTTPException(
@@ -755,23 +776,54 @@ async def get_current_shift_user(
         )
         
     token = credentials.credentials
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid shift token header",
+        )
+
+    alg = header.get("alg", settings.ALGORITHM)
+    kid = header.get("kid")
     
     try:
-        # 1. Decode using the same secret key as your web login
-        payload = jwt.decode(
-            token, 
-            settings.secret_key_str, 
-            algorithms=[settings.ALGORITHM]
-        )
+        if alg.startswith("RS") or alg.startswith("PS"):
+            if not kid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Asymmetric shift token is missing 'kid' in header",
+                )
+            from App.repository.CryptoKeyRepository import CryptoKeyRepository
+            key_repo = CryptoKeyRepository(db)
+            crypto_key = await key_repo.get_by_kid(kid)
+            if not crypto_key:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Cryptographic key with kid '{kid}' not found",
+                )
+            payload = jwt.decode(
+                token,
+                crypto_key.public_key,
+                algorithms=[alg],
+            )
+        else:
+            # Fallback to symmetric HS256
+            payload = jwt.decode(
+                token, 
+                settings.secret_key_str, 
+                algorithms=[settings.ALGORITHM]
+            )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Shift expired"
         )
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid shift token"
+            detail=f"Invalid shift token: {e}"
         )
 
     # 2. Ensure it's actually a shift token, not a standard web login token
@@ -789,6 +841,6 @@ async def get_current_shift_user(
             detail="This shift has been revoked by the admin"
         )
 
-    # 4. Return the payload (user_id, role, shift_id)
+    # 4. Return the payload (user_id, role, shift_id, permissions)
     return payload
 

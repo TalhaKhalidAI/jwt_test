@@ -9,7 +9,10 @@ from sqlalchemy import select, desc, func, insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from App.api.databases.MigrateTable import ScanHistory as ScanHistoryModel
+from App.api.databases.MigrateTable import (
+    ScanHistory as ScanHistoryModel,
+    Shift as ShiftModel,
+)
 from App.core.exceptions import (
     ScanNotFoundError,
     ShiftNotFoundError,
@@ -251,3 +254,54 @@ class ScanHistoryRepository:
 
         logger.info(f"Successfully bulk synced {len(scan_models)} scan records")
         return scan_models
+
+    async def get_by_user(
+        self,
+        user_id: int,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[ScanHistoryModel]:
+        """Fetch scans conducted by a specific user across all their shifts."""
+        stmt = (
+            select(ScanHistoryModel)
+            .join(ShiftModel, ScanHistoryModel.shift_id == ShiftModel.id)
+            .where(ShiftModel.user_id == user_id)
+            .order_by(desc(ScanHistoryModel.scanned_at))
+        )
+        if status:
+            stmt = stmt.where(ScanHistoryModel.status == status)
+
+        stmt = stmt.limit(limit).offset(offset)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def update(
+        self,
+        scan_id: int,
+        status: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> ScanHistoryModel:
+        """Update status or annotation on a scan record."""
+        scan = await self.get_by_id(scan_id)
+        if not scan:
+            raise ScanNotFoundError(f"Scan record {scan_id} not found")
+
+        if status is not None:
+            scan.status = status
+        if reason is not None:
+            scan.reason = reason
+
+        await self._safe_flush()
+        return scan
+
+    async def delete(self, scan_id: int) -> bool:
+        """Permanently delete a scan record."""
+        scan = await self.get_by_id(scan_id)
+        if not scan:
+            raise ScanNotFoundError(f"Scan record {scan_id} not found")
+
+        await self.session.delete(scan)
+        await self._safe_flush()
+        return True
+
