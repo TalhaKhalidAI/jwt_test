@@ -65,4 +65,5 @@ class BulkSyncResponse(BaseModel):
     """Response returned upon batch sync completion."""
     shift_id: str
     synced_count: int
+    skipped_duplicates: Optional[int] = 0
     synced_at: str

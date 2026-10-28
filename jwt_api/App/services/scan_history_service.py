@@ -246,19 +246,53 @@ class ScanHistoryService(BaseService):
         if not self._is_admin(current_user) and shift.user_id != user_id:
             raise PermissionDeniedError("Cannot sync scans to a shift owned by another user")
 
-        if shift.status != "active":
+        if shift.status not in ("active", "completed"):
             raise ValidationError(f"Cannot sync scans: Shift {shift_id} status is '{shift.status}'")
 
-        # Inject shift_id into each item
+        # Deduplicate against scans already persisted for this shift
+        existing_scans = await self.repo.get_by_shift(shift_id, limit=1000)
+        existing_signatures = set()
+        for s in existing_scans:
+            if isinstance(s.jwt_scanned, dict):
+                sig = s.jwt_scanned.get("jti") or s.jwt_scanned.get("raw_token") or str(s.scanned_at)
+            else:
+                sig = str(s.jwt_scanned)
+            existing_signatures.add(sig)
+
+        unique_scans = []
         for item in scans_data:
             item["shift_id"] = shift_id
+            
+            # Ensure scanned_at is a datetime object for asyncpg
+            raw_scanned_at = item.get("scanned_at")
+            if isinstance(raw_scanned_at, str):
+                try:
+                    item["scanned_at"] = datetime.fromisoformat(raw_scanned_at)
+                except Exception:
+                    item["scanned_at"] = datetime.now(timezone.utc)
+            elif not raw_scanned_at:
+                item["scanned_at"] = datetime.now(timezone.utc)
 
-        created_scans = await self.repo.bulk_create(scans_data)
-        logger.info(f"User {user_id} synced {len(created_scans)} scans for shift {shift_id}")
+            if isinstance(item.get("jwt_scanned"), dict):
+                sig = item["jwt_scanned"].get("jti") or item["jwt_scanned"].get("raw_token") or str(item.get("scanned_at"))
+            else:
+                sig = str(item.get("jwt_scanned"))
+            if sig not in existing_signatures:
+                unique_scans.append(item)
+                existing_signatures.add(sig)
+
+        created_scans = []
+        if unique_scans:
+            created_scans = await self.repo.bulk_create(unique_scans)
+
+        logger.info(
+            f"User {user_id} synced {len(created_scans)} new scans (skipped {len(scans_data) - len(unique_scans)} duplicates) for shift {shift_id}"
+        )
 
         return {
             "shift_id": str(shift_id),
             "synced_count": len(created_scans),
+            "skipped_duplicates": len(scans_data) - len(unique_scans),
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
 

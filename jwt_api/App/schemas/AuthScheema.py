@@ -1,5 +1,5 @@
 from pydantic import BaseModel,EmailStr,ConfigDict,SecretStr
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 class TokenResponse(BaseModel):
@@ -33,4 +33,6 @@ class UserResponse(BaseModel):
     id: int
     name: str
     email: EmailStr
-    profile_pic: Optional[str] = None  # Make this Optional
+    user_role: Optional[str] = None
+    permissions: Optional[Dict[str, Any]] = None
+    profile_pic: Optional[str] = None
