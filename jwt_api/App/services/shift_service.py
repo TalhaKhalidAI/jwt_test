@@ -178,16 +178,37 @@ class ShiftService(BaseService):
 
         # Fetch applicable inventory rules for this key
         applicable_rules = await self.rule_repo.get_applicable_rules(key_id=assigned_key_id)
+        rules_list = [
+            {
+                "rule_name": r.rule_name,
+                "matching_claim_key": r.matching_claim_key,
+                "expected_value": r.expected_value,
+            }
+            for r in applicable_rules
+        ]
         rules_dict = {r.matching_claim_key: r.expected_value for r in applicable_rules}
 
-        shift = await self.repo.create_shift(
-            user_id=assigned_user_id,
-            key_id=assigned_key_id,
-            expires_at=expires_at,
-            device_id=device_id,
-        )
+        # Atomic Redis lock to prevent race-condition double shift starts
+        redis_shift_lock = f"shift:active:user:{assigned_user_id}"
+        c = await redis_client.ensure_connected()
+        acquired = await c.set(redis_shift_lock, "active", nx=True, ex=duration_hours * 3600)
+        if not acquired:
+            raise ActiveShiftExistsError(f"User {assigned_user_id} already has an active shift")
 
-        shift_token = self._generate_shift_token(shift, user, crypto_key, rules=rules_dict)
+        try:
+            shift = await self.repo.create_shift(
+                user_id=assigned_user_id,
+                key_id=assigned_key_id,
+                expires_at=expires_at,
+                device_id=device_id,
+            )
+        except Exception:
+            await c.delete(redis_shift_lock)
+            raise
+
+        shift_token = self._generate_shift_token(
+            shift, user, crypto_key, rules=rules_list if rules_list else rules_dict
+        )
 
         logger.info(
             f"Started shift {shift.id} for user {assigned_user_id} with {len(rules_dict)} rules on device {device_id}"
@@ -221,6 +242,12 @@ class ShiftService(BaseService):
                 raise PermissionDeniedError("Cannot checkout a shift belonging to another user")
 
         completed_shift = await self.repo.complete_shift(shift_id)
+        # Release atomic Redis lock
+        try:
+            c = await redis_client.ensure_connected()
+            await c.delete(f"shift:active:user:{completed_shift.user_id}")
+        except Exception as e:
+            logger.warning(f"Could not release active shift Redis lock: {e}")
         logger.info(f"Checked out shift {shift_id} by user {auth_user_id}")
         return self._to_dict(completed_shift)
 
@@ -246,9 +273,10 @@ class ShiftService(BaseService):
 
         revoked_shift = await self.repo.revoke_shift(shift_id, reason=reason.strip())
 
-        # Blacklist in Redis
+        # Release active lock and blacklist in Redis
         try:
             c = await redis_client.ensure_connected()
+            await c.delete(f"shift:active:user:{revoked_shift.user_id}")
             ttl = int((revoked_shift.expires_at - datetime.now(timezone.utc)).total_seconds())
             if ttl > 0:
                 await c.set(revoked_shift_key(str(revoked_shift.id)), "revoked", ex=ttl)

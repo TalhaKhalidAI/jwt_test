@@ -1,5 +1,11 @@
-from pydantic import BaseModel,EmailStr,ConfigDict,SecretStr
+from enum import Enum
+from pydantic import BaseModel, EmailStr, ConfigDict, SecretStr
 from typing import Optional, Dict, Any
+
+class UserRole(str, Enum):
+    ADMIN = "admin"
+    SUPERVISOR = "supervisor"
+    USER = "user" 
 
 
 class TokenResponse(BaseModel):
@@ -19,12 +25,12 @@ class PasswordUpdateRequest(BaseModel):
     old_password: SecretStr | None = None
     otp:Optional[str]=None
 class UpdateUser(BaseModel):
-    name: str | None = None
-    email: EmailStr | None = None
-    password: str | None = None
-    profile_pic: str | None = None
-    disabled: bool | None = None
-    user_role: str | None = None
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    profile_pic: Optional[str] = None
+    disabled: Optional[bool] = None
+    user_role: Optional[UserRole] = None
 
 class UserResponse(BaseModel):
     """For API responses"""

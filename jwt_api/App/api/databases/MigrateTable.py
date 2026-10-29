@@ -1,5 +1,5 @@
 # App/models/user.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, func,JSON,ForeignKey,Text,BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func, JSON, ForeignKey, Text, BigInteger, Index, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 from sqlalchemy.orm import relationship
@@ -49,6 +49,14 @@ class CryptoKey(Base):
 
 class Shift(Base):
     __tablename__ = "shifts"
+    __table_args__ = (
+        Index(
+            "idx_shifts_unique_active_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     user_id = Column(ForeignKey("users.id"), nullable=False)

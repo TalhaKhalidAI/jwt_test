@@ -187,6 +187,10 @@ class ShiftRepository:
             await self._safe_flush()
         except IntegrityError as e:
             msg = str(e.orig).lower()
+            if "unique" in msg or "idx_shifts_unique_active_user" in msg or "duplicate key" in msg:
+                raise ActiveShiftExistsError(
+                    f"User {user_id} already has an active shift"
+                ) from e
             if "foreign key constraint" in msg:
                 raise InfrastructureError(
                     f"Invalid user_id ({user_id}) or key_id ({key_id}) - foreign key violation"

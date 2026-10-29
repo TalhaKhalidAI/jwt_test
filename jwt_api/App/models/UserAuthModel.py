@@ -1,5 +1,11 @@
-from pydantic import BaseModel, EmailStr, field_validator,SecretStr,ConfigDict,Field
+from enum import Enum
+from pydantic import BaseModel, EmailStr, field_validator, SecretStr, ConfigDict, Field
 from typing import Optional, Dict, Any
+
+class UserRole(str, Enum):
+    ADMIN = "admin"
+    SUPERVISOR = "supervisor"
+    USER = "user" 
 import re
 
 class LoginUser(BaseModel):
@@ -68,7 +74,7 @@ class UpdateUser(BaseModel):
     password: str | None = None
     profile_pic: str | None = None
     disabled: bool | None = None  # FIX: renamed from 'disable' to match DB/service layer
-    user_role: str | None = None
+    user_role: UserRole | None = None
 
 class UserResponse(BaseModel):
     """For API responses"""
