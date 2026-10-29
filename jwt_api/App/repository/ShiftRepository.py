@@ -212,13 +212,9 @@ class ShiftRepository:
         if not shift:
             raise ShiftNotFoundError(f"Shift {shift_id} not found")
 
-        if shift.status == "completed":
-            logger.info(f"Shift {shift_id} is already completed.")
-            return shift
-
         if shift.status != "active":
             raise InvalidShiftStateError(
-                f"Cannot complete shift {shift_id}: current status is '{shift.status}'"
+                f"Cannot complete shift {shift_id}: shift has already ended with status '{shift.status}'"
             )
 
         shift.status = "completed"

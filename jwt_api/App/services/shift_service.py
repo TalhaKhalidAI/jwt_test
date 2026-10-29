@@ -220,6 +220,90 @@ class ShiftService(BaseService):
         }
 
     # ================================================================
+    # SHIFT LIFECYCLE: REISSUE TOKEN (FOR LOST TOKENS)
+    # ================================================================
+    async def reissue_active_shift_token(
+        self,
+        current_user: Dict[str, Any],
+        target_user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Reissue/remint a lost shift_token JWT for a currently active shift.
+        - Normal worker can re-issue their own active shift token.
+        - Admin can re-issue for any worker (target_user_id).
+        - Preserves existing shift ID, expiration time, and metadata.
+        """
+        auth_user_id = self._get_user_id(current_user)
+
+        if target_user_id is not None and target_user_id != auth_user_id:
+            if not self._is_admin(current_user) and not self._has_permission(current_user, Permission.SHIFTS_CREATE):
+                raise PermissionDeniedError("Only administrators can reissue shift tokens for other workers")
+            assigned_user_id = target_user_id
+        else:
+            assigned_user_id = auth_user_id
+
+        shift = await self.repo.get_active_shift_by_user(assigned_user_id)
+        if not shift:
+            raise ShiftNotFoundError(f"User {assigned_user_id} does not have an active shift to reissue a token for")
+
+        return await self._reissue_token_for_shift(shift, assigned_user_id)
+
+    async def reissue_shift_by_id(
+        self,
+        shift_id: str | uuid.UUID,
+        current_user: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Reissue token for a specific shift ID if currently active."""
+        shift = await self.repo.get_by_id(shift_id)
+        if not shift:
+            raise ShiftNotFoundError(f"Shift {shift_id} not found")
+
+        auth_user_id = self._get_user_id(current_user)
+        if not self._is_admin(current_user) and shift.user_id != auth_user_id:
+            if not self._has_permission(current_user, Permission.SHIFTS_CREATE):
+                raise PermissionDeniedError("Cannot reissue token for a shift belonging to another user")
+
+        if shift.status != "active":
+            raise InvalidShiftStateError(
+                f"Cannot reissue token for shift {shift_id}: shift is '{shift.status}' and no longer active"
+            )
+
+        return await self._reissue_token_for_shift(shift, shift.user_id)
+
+    async def _reissue_token_for_shift(self, shift, user_id: int) -> Dict[str, Any]:
+        user = await self.user_repo.get_by_id(user_id)
+        if not user or user.is_deleted:
+            raise UserNotFoundError(f"User {user_id} not found or inactive")
+
+        crypto_key = await self.key_repo.get_by_id(shift.key_id)
+        if not crypto_key or crypto_key.status != "active":
+            crypto_key = await self.key_repo.get_latest_active_key()
+            if not crypto_key:
+                raise CryptoKeyNotFoundError("No active cryptographic key available to sign reissued shift token")
+
+        applicable_rules = await self.rule_repo.get_applicable_rules(key_id=crypto_key.id)
+        rules_list = [
+            {
+                "rule_name": r.rule_name,
+                "matching_claim_key": r.matching_claim_key,
+                "expected_value": r.expected_value,
+            }
+            for r in applicable_rules
+        ]
+        rules_dict = {r.matching_claim_key: r.expected_value for r in applicable_rules}
+
+        shift_token = self._generate_shift_token(
+            shift, user, crypto_key, rules=rules_list if rules_list else rules_dict
+        )
+
+        logger.info(f"Reissued shift token for user {user_id} on active shift {shift.id}")
+        return {
+            "shift": self._to_dict(shift),
+            "shift_token": shift_token,
+            "expires_at": shift.expires_at.isoformat() if shift.expires_at else "",
+        }
+
+    # ================================================================
     # SHIFT LIFECYCLE: CHECKOUT
     # ================================================================
     async def checkout_shift(
@@ -240,6 +324,11 @@ class ShiftService(BaseService):
         if not self._is_admin(current_user) and shift.user_id != auth_user_id:
             if not self._has_permission(current_user, Permission.SHIFTS_CHECKOUT):
                 raise PermissionDeniedError("Cannot checkout a shift belonging to another user")
+
+        if shift.status != "active":
+            raise InvalidShiftStateError(
+                f"Cannot checkout shift {shift_id}: shift has already ended with status '{shift.status}'"
+            )
 
         completed_shift = await self.repo.complete_shift(shift_id)
         # Release atomic Redis lock

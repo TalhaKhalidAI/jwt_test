@@ -156,6 +156,74 @@ async def start_shift(
 
 
 @shifts_router.post(
+    "/active/reissue",
+    response_model=StartShiftResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reissue token for active shift (if lost)",
+    description=(
+        "Re-mints and returns a scoped shift_token JWT for a user's currently active shift. "
+        "Normal workers can reissue their own active shift token if lost or misplaced. "
+        "Admins can specify target_user_id to reissue on behalf of any worker."
+    ),
+)
+async def reissue_active_shift_token(
+    target_user_id: Optional[int] = Query(
+        None, description="Target user ID (Admin only). Omit to reissue your own active shift token."
+    ),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ShiftService(db)
+    try:
+        return await service.reissue_active_shift_token(
+            current_user=current_user,
+            target_user_id=target_user_id,
+        )
+    except ShiftNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CryptoKeyNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except InvalidShiftStateError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@shifts_router.post(
+    "/{shift_id}/reissue",
+    response_model=StartShiftResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reissue token for specific shift ID (if active)",
+    description="Re-mints a shift_token JWT for a specific shift ID if it is currently active.",
+)
+async def reissue_shift_by_id(
+    shift_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ShiftService(db)
+    try:
+        return await service.reissue_shift_by_id(
+            shift_id=shift_id,
+            current_user=current_user,
+        )
+    except ShiftNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except CryptoKeyNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except InvalidShiftStateError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@shifts_router.post(
     "/checkout",
     response_model=ShiftResponse,
     summary="Checkout of current active shift (Self-Service)",
