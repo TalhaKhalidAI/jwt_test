@@ -73,11 +73,13 @@ async def get_my_active_shift(
     description=(
         "Retrieve shifts. "
         "Normal users receive their OWN shift history. "
-        "Admins or users with SHIFTS_VIEW can list all active shifts across the company or filter by user_id."
+        "Admins or users with SHIFTS_VIEW can list shifts across all users (active and inactive) or filter by user_id. "
+        "Use active_only=true to view only active shifts, or active_only=false to view all shifts."
     ),
 )
 async def list_shifts(
-    user_id: Optional[int] = Query(None, description="Filter by user ID (Admin/Supervisor only)"),
+    user_id: Optional[int] = Query(None, description="Filter by user ID (Admin/Supervisor only). If omitted, lists shifts across all users."),
+    active_only: bool = Query(False, description="Filter active shifts only (true) or all active/inactive shifts (false)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -87,6 +89,7 @@ async def list_shifts(
     return await service.list_shifts(
         current_user=current_user,
         target_user_id=user_id,
+        active_only=active_only,
         limit=limit,
         offset=offset,
     )

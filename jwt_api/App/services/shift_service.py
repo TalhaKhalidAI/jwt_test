@@ -290,32 +290,42 @@ class ShiftService(BaseService):
         self,
         current_user: Dict[str, Any],
         target_user_id: Optional[int] = None,
+        active_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
         """
         List shift history:
-        - Admin or SHIFTS_VIEW: Can view active shifts or query by target_user_id.
-        - Normal user: Receives their OWN shift history.
+        - If target_user_id is None:
+            - Admin or SHIFTS_VIEW: returns shifts across all users (active and inactive, or active only if active_only=True).
+            - Normal user: returns their own shifts.
+        - If target_user_id is specified:
+            - Admin or SHIFTS_VIEW: filters by target_user_id.
+            - Normal user: restricted to their own user_id.
+        - active_only: If True, filters for status == 'active'. If False, returns all (active and inactive).
         """
         is_privileged = self._is_admin(current_user) or self._has_permission(
             current_user, Permission.SHIFTS_VIEW
         )
         auth_user_id = self._get_user_id(current_user)
 
-        if is_privileged and target_user_id is None:
-            shifts = await self.repo.get_active_shifts(limit=limit, offset=offset)
+        if is_privileged:
+            query_user_id = target_user_id
         else:
-            query_user_id = target_user_id if is_privileged and target_user_id else auth_user_id
-            shifts = await self.repo.get_shifts_by_user(
-                user_id=query_user_id, limit=limit, offset=offset
-            )
+            query_user_id = auth_user_id
+
+        shifts, total_count = await self.repo.list_shifts_filtered(
+            user_id=query_user_id,
+            active_only=active_only,
+            limit=limit,
+            offset=offset,
+        )
 
         return {
             "items": [self._to_dict(s) for s in shifts],
             "limit": limit,
             "offset": offset,
-            "total": len(shifts),
+            "total": total_count,
         }
 
     # ================================================================

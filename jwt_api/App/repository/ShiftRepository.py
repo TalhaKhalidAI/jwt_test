@@ -1,8 +1,8 @@
 # App/repository/ShiftRepository.py
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
-from typing import Optional, List
+from sqlalchemy import select, update, func
+from typing import Optional, List, Tuple
 import logging
 from datetime import datetime, timezone
 import uuid
@@ -108,6 +108,43 @@ class ShiftRepository:
             .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def list_shifts_filtered(
+        self,
+        user_id: Optional[int] = None,
+        active_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[ShiftModel], int]:
+        """
+        List shifts with flexible filtering:
+        - user_id: If specified, filter by worker user_id. If None, retrieve shifts across all users.
+        - active_only: If True, only retrieve status == 'active'. If False, retrieve all (active and inactive).
+        - limit / offset: Pagination.
+        Returns: (shifts_list, total_count)
+        """
+        stmt = select(ShiftModel)
+        count_stmt = select(func.count()).select_from(ShiftModel)
+
+        conditions = []
+        if user_id is not None:
+            conditions.append(ShiftModel.user_id == user_id)
+        if active_only:
+            conditions.append(ShiftModel.status == "active")
+
+        if conditions:
+            stmt = stmt.where(*conditions)
+            count_stmt = count_stmt.where(*conditions)
+
+        stmt = stmt.order_by(ShiftModel.started_at.desc()).limit(limit).offset(offset)
+
+        total_res = await self.session.execute(count_stmt)
+        total_count = total_res.scalar() or 0
+
+        shifts_res = await self.session.execute(stmt)
+        shifts = list(shifts_res.scalars().all())
+
+        return shifts, total_count
 
     # ================================================================
     # LIFECYCLE METHODS
