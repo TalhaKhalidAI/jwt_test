@@ -362,6 +362,10 @@ async def verify_token(
 )
 async def generate_product_tag_qr(
     payload: GenerateProductTagQRRequest,
+    qr_only: bool = Query(
+        False,
+        description="Checkbox: if checked (true), returns the QR code image (PNG) directly so it can be scanned from screen. If unchecked (false), returns raw JSON data.",
+    ),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -377,7 +381,7 @@ async def generate_product_tag_qr(
             border=payload.border,
         )
 
-        if payload.format.lower() == "png":
+        if qr_only or payload.format.lower() == "png":
             return Response(
                 content=result["png_bytes"],
                 media_type="image/png",

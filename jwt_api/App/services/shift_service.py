@@ -3,6 +3,7 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, timezone
 import uuid
+import json
 import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -132,6 +133,7 @@ class ShiftService(BaseService):
         key_id: Optional[str | uuid.UUID] = None,
         duration_hours: int = 8,
         device_id: Optional[str] = None,
+        include_rules: bool = True,
     ) -> Dict[str, Any]:
         """
         Start an active work shift.
@@ -206,8 +208,14 @@ class ShiftService(BaseService):
             await c.delete(redis_shift_lock)
             raise
 
+        if include_rules:
+            # Embed compact rules to ensure JWT fits standard QR camera resolution
+            embedded_rules = rules_dict if (len(rules_list) > 3 or len(json.dumps(rules_list)) > 600) else (rules_list if rules_list else rules_dict)
+        else:
+            embedded_rules = {}
+
         shift_token = self._generate_shift_token(
-            shift, user, crypto_key, rules=rules_list if rules_list else rules_dict
+            shift, user, crypto_key, rules=embedded_rules
         )
 
         logger.info(
@@ -226,6 +234,7 @@ class ShiftService(BaseService):
         self,
         current_user: Dict[str, Any],
         target_user_id: Optional[int] = None,
+        include_rules: bool = True,
     ) -> Dict[str, Any]:
         """
         Reissue/remint a lost shift_token JWT for a currently active shift.
@@ -246,12 +255,13 @@ class ShiftService(BaseService):
         if not shift:
             raise ShiftNotFoundError(f"User {assigned_user_id} does not have an active shift to reissue a token for")
 
-        return await self._reissue_token_for_shift(shift, assigned_user_id)
+        return await self._reissue_token_for_shift(shift, assigned_user_id, include_rules=include_rules)
 
     async def reissue_shift_by_id(
         self,
         shift_id: str | uuid.UUID,
         current_user: Dict[str, Any],
+        include_rules: bool = True,
     ) -> Dict[str, Any]:
         """Reissue token for a specific shift ID if currently active."""
         shift = await self.repo.get_by_id(shift_id)
@@ -268,9 +278,9 @@ class ShiftService(BaseService):
                 f"Cannot reissue token for shift {shift_id}: shift is '{shift.status}' and no longer active"
             )
 
-        return await self._reissue_token_for_shift(shift, shift.user_id)
+        return await self._reissue_token_for_shift(shift, shift.user_id, include_rules=include_rules)
 
-    async def _reissue_token_for_shift(self, shift, user_id: int) -> Dict[str, Any]:
+    async def _reissue_token_for_shift(self, shift, user_id: int, include_rules: bool = True) -> Dict[str, Any]:
         user = await self.user_repo.get_by_id(user_id)
         if not user or user.is_deleted:
             raise UserNotFoundError(f"User {user_id} not found or inactive")
@@ -292,11 +302,17 @@ class ShiftService(BaseService):
         ]
         rules_dict = {r.matching_claim_key: r.expected_value for r in applicable_rules}
 
+        if include_rules:
+            # Embed compact rules to ensure JWT fits standard QR camera resolution
+            embedded_rules = rules_dict if (len(rules_list) > 3 or len(json.dumps(rules_list)) > 600) else (rules_list if rules_list else rules_dict)
+        else:
+            embedded_rules = {}
+
         shift_token = self._generate_shift_token(
-            shift, user, crypto_key, rules=rules_list if rules_list else rules_dict
+            shift, user, crypto_key, rules=embedded_rules
         )
 
-        logger.info(f"Reissued shift token for user {user_id} on active shift {shift.id}")
+        logger.info(f"Reissued shift token for user {user_id} on active shift {shift.id} (include_rules={include_rules})")
         return {
             "shift": self._to_dict(shift),
             "shift_token": shift_token,

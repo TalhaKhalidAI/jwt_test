@@ -17,9 +17,11 @@ Permissions & Authorization Rules:
         * Can do anything on ANY account (start, checkout, revoke, view, expire-old).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional
+
+from App.core.qr_utils import generate_qr_png_bytes
 
 from App.core.Connector import get_db
 from App.core.LoggingInit import get_core_logger
@@ -121,28 +123,58 @@ async def get_shift_by_id(
 @shifts_router.post(
     "/start",
     response_model=StartShiftResponse,
+    responses={
+        201: {
+            "content": {
+                "application/json": {},
+                "image/png": {},
+            },
+            "description": "Returns raw JSON data by default, or QR code PNG image if qr_only is true.",
+        }
+    },
     status_code=status.HTTP_201_CREATED,
     summary="Start a new work shift",
     description=(
         "Initiates a work shift and returns a scoped shift_token JWT for mobile scanner authorization. "
         "Normal workers can start shifts for THEMSELVES. "
-        "Admins can specify target_user_id to start a shift on behalf of any worker."
+        "Admins can specify target_user_id to start a shift on behalf of any worker. "
+        "Set qr_only=true to view the scannable QR code image directly."
     ),
 )
 async def start_shift(
     payload: StartShiftRequest,
+    qr_only: bool = Query(
+        False,
+        description="Checkbox: if checked (true), returns the QR code image (PNG) of the shift token directly to scan on screen. If false (unchecked), returns raw JSON data.",
+    ),
+    include_rules: Optional[bool] = Query(
+        None,
+        description="Checkbox: if true (checked), embeds active inventory rules into the shift token. If false (unchecked), token is minted without rules.",
+    ),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     service = ShiftService(db)
+    should_include_rules = include_rules if include_rules is not None else payload.include_rules
     try:
-        return await service.start_shift(
+        result = await service.start_shift(
             current_user=current_user,
             target_user_id=payload.target_user_id,
             key_id=payload.key_id,
             duration_hours=payload.duration_hours,
             device_id=payload.device_id,
+            include_rules=should_include_rules,
         )
+        if qr_only:
+            png_bytes = generate_qr_png_bytes(result["shift_token"])
+            return Response(
+                content=png_bytes,
+                media_type="image/png",
+                headers={
+                    "Content-Disposition": f'inline; filename="shift_{result["shift"]["id"]}_qr.png"'
+                },
+            )
+        return result
     except ActiveShiftExistsError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except UserNotFoundError as e:
@@ -158,27 +190,56 @@ async def start_shift(
 @shifts_router.post(
     "/active/reissue",
     response_model=StartShiftResponse,
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "image/png": {},
+            },
+            "description": "Returns raw JSON data by default, or QR code PNG image if qr_only is true.",
+        }
+    },
     status_code=status.HTTP_200_OK,
     summary="Reissue token for active shift (if lost)",
     description=(
         "Re-mints and returns a scoped shift_token JWT for a user's currently active shift. "
         "Normal workers can reissue their own active shift token if lost or misplaced. "
-        "Admins can specify target_user_id to reissue on behalf of any worker."
+        "Admins can specify target_user_id to reissue on behalf of any worker. "
+        "Set qr_only=true to view the scannable QR code image directly."
     ),
 )
 async def reissue_active_shift_token(
     target_user_id: Optional[int] = Query(
         None, description="Target user ID (Admin only). Omit to reissue your own active shift token."
     ),
+    qr_only: bool = Query(
+        False,
+        description="Checkbox: if checked (true), returns the QR code image (PNG) of the shift token directly to scan on screen. If false (unchecked), returns raw JSON data.",
+    ),
+    include_rules: bool = Query(
+        True,
+        description="Checkbox: if checked (true), embeds active inventory rules into the reissued shift token. If false (unchecked), omits rules for a lighter token.",
+    ),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     service = ShiftService(db)
     try:
-        return await service.reissue_active_shift_token(
+        result = await service.reissue_active_shift_token(
             current_user=current_user,
             target_user_id=target_user_id,
+            include_rules=include_rules,
         )
+        if qr_only:
+            png_bytes = generate_qr_png_bytes(result["shift_token"])
+            return Response(
+                content=png_bytes,
+                media_type="image/png",
+                headers={
+                    "Content-Disposition": f'inline; filename="shift_{result["shift"]["id"]}_qr.png"'
+                },
+            )
+        return result
     except ShiftNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except UserNotFoundError as e:
@@ -196,21 +257,49 @@ async def reissue_active_shift_token(
 @shifts_router.post(
     "/{shift_id}/reissue",
     response_model=StartShiftResponse,
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "image/png": {},
+            },
+            "description": "Returns raw JSON data by default, or QR code PNG image if qr_only is true.",
+        }
+    },
     status_code=status.HTTP_200_OK,
     summary="Reissue token for specific shift ID (if active)",
-    description="Re-mints a shift_token JWT for a specific shift ID if it is currently active.",
+    description="Re-mints a shift_token JWT for a specific shift ID if it is currently active. Set qr_only=true to view the scannable QR code image directly.",
 )
 async def reissue_shift_by_id(
     shift_id: str,
+    qr_only: bool = Query(
+        False,
+        description="Checkbox: if checked (true), returns the QR code image (PNG) of the shift token directly to scan on screen. If false (unchecked), returns raw JSON data.",
+    ),
+    include_rules: bool = Query(
+        True,
+        description="Checkbox: if checked (true), embeds active inventory rules into the reissued shift token. If false (unchecked), omits rules for a lighter token.",
+    ),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     service = ShiftService(db)
     try:
-        return await service.reissue_shift_by_id(
+        result = await service.reissue_shift_by_id(
             shift_id=shift_id,
             current_user=current_user,
+            include_rules=include_rules,
         )
+        if qr_only:
+            png_bytes = generate_qr_png_bytes(result["shift_token"])
+            return Response(
+                content=png_bytes,
+                media_type="image/png",
+                headers={
+                    "Content-Disposition": f'inline; filename="shift_{shift_id}_qr.png"'
+                },
+            )
+        return result
     except ShiftNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except UserNotFoundError as e:

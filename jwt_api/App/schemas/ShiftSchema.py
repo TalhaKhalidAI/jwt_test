@@ -16,6 +16,10 @@ class StartShiftRequest(BaseModel):
     )
     duration_hours: int = Field(8, ge=1, le=24, description="Shift duration in hours (1-24)")
     device_id: Optional[str] = Field(None, max_length=255, description="Physical scanner or handheld device serial/ID")
+    include_rules: bool = Field(
+        True,
+        description="Checkbox: if true (checked), embeds active inventory rules into the shift token. If false (unchecked), token is minted without rules."
+    )
 
 
 class RevokeShiftRequest(BaseModel):
@@ -43,6 +47,7 @@ class StartShiftResponse(BaseModel):
     shift: ShiftResponse
     shift_token: str
     expires_at: str
+    qr_code_base64: Optional[str] = None
 
 
 class ShiftListResponse(BaseModel):
