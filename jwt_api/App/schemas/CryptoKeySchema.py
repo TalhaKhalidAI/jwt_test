@@ -182,4 +182,11 @@ class ProductTagQRResponse(BaseModel):
     payload: Dict[str, Any]
 
 
+class ExportPrivateKeyRequest(BaseModel):
+    """Payload to request decrypted private key export with step-up verification."""
+    password: str = Field(..., description="Account password required for high-security step-up authorization")
+    otp: Optional[str] = Field(None, description="6-digit TOTP / Email OTP code (required if MFA is enabled on user account)")
+
+
+
 

@@ -122,13 +122,21 @@ async def login(
     except HTTPException:
         raise
     except MFARequiredError as e:
+        mfa_headers = {
+            "X-MFA-Required": "true",
+            "X-MFA-Method": e.method,
+        }
+        if e.email:
+            mfa_headers["X-MFA-Email"] = e.email
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"MFA code required (method: {e.method})",
-            headers={
-                "X-MFA-Required": "true",
-                "X-MFA-Method": e.method,
+            detail={
+                "message": f"MFA code required (method: {e.method})",
+                "mfa_required": True,
+                "mfa_method": e.method,
+                "email": e.email,
             },
+            headers=mfa_headers,
         )
     except InvalidMFACodeError:                       # ← NEW
         raise HTTPException(

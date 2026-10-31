@@ -80,7 +80,7 @@ class AuthService:
             method = full_user.mfa_method or "totp"
 
             if not mfa_code:
-                raise MFARequiredError(method=method)
+                raise MFARequiredError(method=method, email=full_user.email if full_user else user.get("email"))
 
             ok = await MFAService(self.db).verify_for_login(full_user, mfa_code)
             if not ok:

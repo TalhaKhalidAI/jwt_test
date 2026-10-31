@@ -401,12 +401,22 @@ app.add_middleware(IdempotencyMiddleware)
 ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
+for _origin in ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"]:
+    if _origin not in ALLOWED_ORIGINS:
+        ALLOWED_ORIGINS.append(_origin)
 app.add_middleware(                                                      # outermost
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Request-ID",
+        "X-MFA-Required",
+        "X-MFA-Method",
+        "X-MFA-Email",
+        "Retry-After",
+    ],
 )
 
 

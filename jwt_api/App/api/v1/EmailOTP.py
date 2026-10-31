@@ -19,12 +19,12 @@ VALID_PURPOSES = {p.value for p in OTPPurpose}
 
 
 class SendOTPRequest(BaseModel):
-    email: EmailStr
+    email: str
     purpose: str = "verification"
 
 
 class VerifyOTPRequest(BaseModel):
-    email: EmailStr
+    email: str
     purpose: str = "verification"
     code: str
 

@@ -162,9 +162,10 @@ class MFARequiredError(DomainError):
     """User has MFA enabled but no code was provided in the login request."""
     default_message = "MFA code required"
 
-    def __init__(self, message: str | None = None, method: str = "totp"):
+    def __init__(self, message: str | None = None, method: str = "totp", email: str | None = None):
         super().__init__(message or self.default_message)
         self.method = method
+        self.email = email
 class InvalidMFACodeError(DomainError):
     """The provided MFA code did not match the user's TOTP."""
     default_message = "Invalid MFA code"

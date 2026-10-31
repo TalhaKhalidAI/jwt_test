@@ -27,9 +27,12 @@ from App.core.exceptions import (
     PermissionDeniedError,
 )
 from App.models.Permissions import Permission
-from App.api.dependencies.auth import get_current_user
+from App.api.dependencies.auth import get_current_user, verify_password
 from App.api.dependencies.permissions import require_permission
 from App.services.crypto_key_service import CryptoKeyService
+from App.repository.UserRepository import UserRepository
+from App.services.mfa_service import MFAService
+from App.schemas.otp_purposes import OTPPurpose
 from App.schemas.CryptoKeySchema import (
     CreateKeyRequest,
     RotateKeyRequest,
@@ -43,6 +46,7 @@ from App.schemas.CryptoKeySchema import (
     VerifyTokenResponse,
     GenerateProductTagQRRequest,
     ProductTagQRResponse,
+    ExportPrivateKeyRequest,
 )
 
 
@@ -252,13 +256,21 @@ async def revoke_key(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+@crypto_keys_router.post(
+    "/{key_id}/export-private",
+    summary="Export decrypted private key (Admin Only with Step-Up Auth)",
+    description="High-security administrative operation to decrypt and export an RSA private key. Requires admin password and valid MFA code (if MFA is enabled on user account).",
+)
 @crypto_keys_router.get(
     "/{key_id}/export-private",
-    summary="Export decrypted private key (Admin Only)",
-    description="High-security administrative operation to decrypt and export an RSA private key. Requires admin role and leaves an audit trail.",
+    summary="Export decrypted private key (Admin Only with Step-Up Auth)",
+    include_in_schema=False,
 )
 async def export_private_key(
     key_id: str,
+    payload: Optional[ExportPrivateKeyRequest] = None,
+    password: Optional[str] = Query(None, description="Account password (for GET requests)"),
+    otp: Optional[str] = Query(None, description="6-digit MFA OTP code (for GET requests)"),
     current_user: Dict[str, Any] = Depends(
         require_permission([Permission.KEYS_VIEW], mode="any", bypass_admin=False)
     ),
@@ -272,6 +284,48 @@ async def export_private_key(
         )
 
     authenticated_user_id = current_user.get("user_id") or current_user.get("id")
+    repo = UserRepository(db)
+    actor = await repo.get_by_id(authenticated_user_id)
+    if not actor:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User account not found")
+
+    # Step 1: Password Verification (Always required for both MFA and non-MFA users)
+    req_password = payload.password if payload and payload.password else password
+    if not req_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account password is required to export private key",
+        )
+    if not verify_password(req_password, actor.password_hash):
+        logger.warning(f"Failed password verification during private key export: actor={actor.id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid account password",
+        )
+
+    # Step 2: MFA Verification (Required ONLY if MFA is enabled on user account)
+    if actor.mfa_enabled:
+        req_otp = payload.otp if payload and payload.otp else otp
+        if not req_otp:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"MFA code required (method: {actor.mfa_method or 'totp'})",
+                headers={
+                    "X-MFA-Required": "true",
+                    "X-MFA-Method": actor.mfa_method or "totp",
+                },
+            )
+        mfa_service = MFAService(db)
+        ok = await mfa_service.verify_code_for_actor(
+            actor, req_otp.strip(), purpose=OTPPurpose.MFA_STEPUP.value
+        )
+        if not ok:
+            logger.warning(f"Failed MFA verification during private key export: actor={actor.id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired MFA code",
+            )
+
     service = CryptoKeyService(db)
     try:
         return await service.export_private_key(
